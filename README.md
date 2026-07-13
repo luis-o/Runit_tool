@@ -1,0 +1,72 @@
+# runit
+
+`runit` reads a project's `README.md`, figures out how the tool it describes is
+meant to be launched, and runs it. When a README documents more than one
+plausible launch command, `runit` asks which one you want instead of guessing.
+
+It ranks the fenced code blocks in a README by:
+
+- **section heading** — commands under *Usage*, *Quick start*, *Running*, etc.
+  score higher, and
+- **command shape** — lines that look like launchers (`./app`, `python …`,
+  `npm start`, `docker run …`, `flask run`, `cargo run`, …) score higher than
+  ordinary text.
+
+Setup lines (`pip install`, `npm install`, `git clone`, `cargo build`, …) are
+recognised and skipped, so they're never mistaken for the launch command.
+
+## Install
+
+Put `runit` on your `PATH` with the bundled installer:
+
+```bash
+./install.sh
+```
+
+By default it symlinks `runit` into the first writable bin directory on your
+`PATH` (`~/.local/bin`, `~/bin`, or `/usr/local/bin`) and marks it executable.
+If that directory isn't on your `PATH`, the installer prints the `export` line
+to add to your shell profile.
+
+Options:
+
+```bash
+./install.sh --dir ~/bin    # install into a specific directory
+./install.sh --copy         # copy the file instead of symlinking
+./install.sh --uninstall    # remove a previously installed runit
+```
+
+## Usage
+
+Run it against the current directory, another directory, or a specific
+markdown file:
+
+```bash
+runit                    # use README.md in the current directory
+runit path/to/dir        # use README.md in that directory
+runit path/to/FILE.md    # use that specific markdown file
+```
+
+Preview what it found without running anything, or skip the confirmation when
+there's a single obvious command:
+
+```bash
+runit --list             # show ranked launch candidates, run nothing
+runit --yes              # run the single obvious candidate without confirming
+```
+
+## How it works
+
+1. Locate the README (`find_readme`) — a directory resolves to its `README.md`.
+2. Parse fenced code blocks and remember the heading each lives under
+   (`parse_blocks`).
+3. Clean each line — strip `$`/`>` prompts and trailing comments
+   (`clean_command`).
+4. Drop setup lines, keep launch-looking ones, de-duplicate, and rank them by
+   score (`collect_candidates`).
+5. If one candidate clearly wins, confirm and run it; if several tie, list them
+   and ask.
+
+## Requirements
+
+- Python 3 (uses only the standard library — no dependencies).
