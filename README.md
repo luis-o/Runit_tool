@@ -53,17 +53,26 @@ there's a single obvious command:
 ```bash
 runit --list             # show ranked launch candidates, run nothing
 runit --yes              # run the single obvious candidate without confirming
+runit --setup            # run setup steps (pip install, …) first, then launch
+runit --help             # show help
 ```
+
+With `--setup`, the setup commands the README documents (`pip install`,
+`npm install`, …) are run in order first; if any of them fails, `runit` stops
+and does not launch.
 
 ## How it works
 
 1. Locate the README (`find_readme`) — a directory resolves to its `README.md`.
-2. Parse fenced code blocks and remember the heading each lives under
-   (`parse_blocks`).
+2. Parse fenced code blocks, remembering the heading and fence language each
+   lives under (`parse_blocks`). Blocks tagged with a non-shell language
+   (```` ```json ````, ```` ```python ````, …) are ignored so their contents
+   can't be mistaken for commands.
 3. Clean each line — strip `$`/`>` prompts and trailing comments
    (`clean_command`).
 4. Drop setup lines, keep launch-looking ones, de-duplicate, and rank them by
-   score (`collect_candidates`).
+   score (`collect_candidates`). A chained command like `cd app && npm start`
+   is judged by its last step, so it isn't mistaken for setup.
 5. If one candidate clearly wins, confirm and run it; if several tie, list them
    and ask.
 

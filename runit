@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-launch.py — read a README.md, figure out how to launch the tool it describes,
+runit — read a README.md, figure out how to launch the tool it describes,
 and run it. When there is more than one plausible way to launch, ask instead
 of guessing.
 
 Usage:
-    ./launch.py                 # use README.md in the current directory
-    ./launch.py path/to/dir     # use README.md in that directory
-    ./launch.py path/to/FILE.md # use that specific markdown file
-    ./launch.py --list          # only show the candidates, don't run anything
-    ./launch.py --yes           # run the single obvious candidate without confirming
+    runit                   # use README.md in the current directory
+    runit path/to/dir       # use README.md in that directory
+    runit path/to/FILE.md   # use that specific markdown file
+    runit --list            # only show the candidates, don't run anything
+    runit --yes             # run the single obvious candidate without confirming
+    runit --setup           # run setup steps (pip install, …) first, then launch
+    runit --help            # show this help
 """
 
 import os
@@ -38,11 +40,21 @@ SETUP_HINTS = [
     "cargo build", "go build", "make install", "make build",
 ]
 
+# Fence languages whose contents we treat as shell commands. Anything with an
+# explicit non-shell language (```json, ```python, ```yaml, …) is skipped so its
+# contents can't be mistaken for launch commands. An empty tag (plain ```) is
+# the common case for shell snippets, so it's allowed.
+SHELL_LANGS = {
+    "", "sh", "bash", "shell", "zsh", "console", "shellsession",
+    "shell-session", "sh-session", "shellscript", "text", "plaintext",
+}
+
 
 class Block:
     """A fenced code block together with the heading it lives under."""
-    def __init__(self, section, lines):
+    def __init__(self, section, lang, lines):
         self.section = section          # lowercased nearest heading, or ""
+        self.lang = lang                # lowercased fence language tag, or ""
         self.lines = lines              # raw lines inside the fence
 
 
@@ -65,6 +77,7 @@ def parse_blocks(path):
     section = ""
     in_fence = False
     fence_lines = []
+    fence_lang = ""
     heading_re = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
 
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -74,11 +87,16 @@ def parse_blocks(path):
 
             if stripped.startswith("```") or stripped.startswith("~~~"):
                 if in_fence:
-                    blocks.append(Block(section, fence_lines))
+                    blocks.append(Block(section, fence_lang, fence_lines))
                     fence_lines = []
+                    fence_lang = ""
                     in_fence = False
                 else:
                     in_fence = True
+                    marker = "```" if stripped.startswith("```") else "~~~"
+                    info = stripped[len(marker):].strip()
+                    # The first token of the info string is the language.
+                    fence_lang = info.split()[0].lower() if info else ""
                 continue
 
             if in_fence:
@@ -105,13 +123,26 @@ def clean_command(line):
     return line
 
 
+def effective_segment(cmd):
+    """The step that decides what a command does — the last '&&'-joined part.
+
+    So `cd app && npm start` is judged by `npm start` (a launch), not by the
+    leading `cd` (which would otherwise look like setup).
+    """
+    if "&&" in cmd:
+        parts = [p.strip() for p in cmd.split("&&") if p.strip()]
+        if parts:
+            return parts[-1]
+    return cmd
+
+
 def is_setup(cmd):
-    low = cmd.lower()
+    low = effective_segment(cmd).lower()
     return any(h in low for h in SETUP_HINTS)
 
 
 def looks_like_launch(cmd):
-    low = cmd.lower()
+    low = effective_segment(cmd).lower()
     return any(h in low for h in RUN_HINTS)
 
 
@@ -123,7 +154,7 @@ def score(cmd, section):
         s += 10 - RUN_SECTIONS.index(section)
     if looks_like_launch(cmd):
         s += 5
-    if cmd.startswith("./"):
+    if effective_segment(cmd).startswith("./"):
         s += 3
     return s
 
@@ -133,6 +164,8 @@ def collect_candidates(blocks):
     seen = set()
     candidates = []
     for block in blocks:
+        if block.lang not in SHELL_LANGS:
+            continue
         for raw in block.lines:
             cmd = clean_command(raw)
             if not cmd or is_setup(cmd):
@@ -145,6 +178,24 @@ def collect_candidates(blocks):
             candidates.append((cmd, block.section, score(cmd, block.section)))
     candidates.sort(key=lambda c: c[2], reverse=True)
     return candidates
+
+
+def collect_setup(blocks):
+    """Return setup commands (pip install, npm install, …) in document order."""
+    seen = set()
+    setup = []
+    for block in blocks:
+        if block.lang not in SHELL_LANGS:
+            continue
+        for raw in block.lines:
+            cmd = clean_command(raw)
+            if not cmd or not is_setup(cmd):
+                continue
+            if cmd in seen:
+                continue
+            seen.add(cmd)
+            setup.append(cmd)
+    return setup
 
 
 def ask_choice(candidates):
@@ -164,7 +215,16 @@ def ask_choice(candidates):
         print("Please enter a number from the list, or 'q' to quit.")
 
 
-def confirm(cmd):
+def show_setup(setup_cmds):
+    if setup_cmds:
+        print("Setup steps that will run first:")
+        for s in setup_cmds:
+            print(f"  $ {s}")
+        print()
+
+
+def confirm(cmd, setup_cmds):
+    show_setup(setup_cmds)
     reply = input(f"Run:  {cmd}\n[Y/n] ").strip().lower()
     return reply in ("", "y", "yes")
 
@@ -179,6 +239,11 @@ def main(argv):
     flags = {a for a in argv if a.startswith("-")}
     list_only = "--list" in flags
     auto_yes = "--yes" in flags or "-y" in flags
+    do_setup = "--setup" in flags
+
+    if "--help" in flags or "-h" in flags:
+        print(__doc__.strip())
+        return 0
 
     target = args[0] if args else "."
     readme = find_readme(target)
@@ -189,7 +254,8 @@ def main(argv):
     workdir = os.path.dirname(os.path.abspath(readme)) or "."
     print(f"Reading {readme}\n")
 
-    candidates = collect_candidates(parse_blocks(readme))
+    blocks = parse_blocks(readme)
+    candidates = collect_candidates(blocks)
     if not candidates:
         print("Couldn't find any launch command in the README.", file=sys.stderr)
         return 1
@@ -206,16 +272,32 @@ def main(argv):
 
     if len(tied) == 1:
         cmd = top[0]
-        if auto_yes or confirm(cmd):
-            return run(cmd, workdir)
-        print("Aborted.")
-        return 0
+        chosen = auto_yes  # with --yes we don't reconfirm below
+    else:
+        # Ambiguous — ask rather than guess. The choice itself is confirmation.
+        cmd = ask_choice(candidates)
+        if cmd is None:
+            print("Aborted.")
+            return 0
+        chosen = True
 
-    # Ambiguous — ask rather than guess.
-    cmd = ask_choice(candidates)
-    if cmd is None:
-        print("Aborted.")
-        return 0
+    setup_cmds = collect_setup(blocks) if do_setup else []
+
+    if not chosen:
+        if not confirm(cmd, setup_cmds):
+            print("Aborted.")
+            return 0
+    else:
+        show_setup(setup_cmds)
+
+    # Run setup steps first; stop if any of them fails.
+    for s in setup_cmds:
+        rc = run(s, workdir)
+        if rc != 0:
+            print(f"Setup step failed (exit {rc}); not launching.",
+                  file=sys.stderr)
+            return rc
+
     return run(cmd, workdir)
 
 
