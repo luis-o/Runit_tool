@@ -11,13 +11,27 @@ Usage:
     runit --list            # only show the candidates, don't run anything
     runit --yes             # run the single obvious candidate without confirming
     runit --setup           # run setup steps (pip install, …) first, then launch
+    runit --bg              # run the launched process in the background; press
+                            #   'q' (or Ctrl-C) to stop it
     runit --help            # show this help
 """
 
 import os
 import re
 import sys
+import time
+import signal
 import subprocess
+
+# Single-keypress support for the "press q to stop" watcher. POSIX only; on
+# platforms without these we simply fall back to a plain blocking wait.
+try:
+    import termios
+    import tty
+    import select
+    _POSIX_TTY = True
+except ImportError:
+    _POSIX_TTY = False
 
 # Section headings (lowercased) that tend to contain launch instructions,
 # in rough order of how strongly they signal "this is how you run it".
@@ -234,12 +248,83 @@ def run(cmd, cwd):
     return subprocess.call(cmd, shell=True, cwd=cwd)
 
 
+def _terminate(proc, grace=5.0):
+    """Stop the child's whole process group: SIGTERM, then SIGKILL if it lingers."""
+    if proc.poll() is not None:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            # The child leads its own process group (start_new_session=True),
+            # so its PGID equals its PID — signal the group to catch children.
+            os.killpg(proc.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.send_signal(sig)
+            except ProcessLookupError:
+                return
+        deadline = grace / 10.0
+        for _ in range(10):
+            if proc.poll() is not None:
+                return
+            time.sleep(deadline)
+
+
+def run_background(cmd, cwd):
+    """Launch cmd detached from the terminal; stop it on 'q' or Ctrl-C."""
+    print(f"\n$ {cmd}\n", flush=True)
+    watchable = _POSIX_TTY and sys.stdin.isatty()
+
+    # Switch the terminal to cbreak mode *before* launching, so a 'q' pressed
+    # early is delivered a keystroke at a time (not line-buffered) and isn't
+    # echoed to the screen.
+    old_attrs = None
+    if watchable:
+        old_attrs = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+        print("(running in the background — press 'q' to stop)\n", flush=True)
+
+    # Give the child its own session so we can signal the whole group, and cut
+    # it off from our stdin so keypresses reach runit's watcher, not the child.
+    proc = subprocess.Popen(
+        cmd, shell=True, cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    stopped_by_user = False
+    try:
+        if not watchable:
+            # No interactive terminal to read 'q' from — just wait it out.
+            proc.wait()
+        else:
+            while proc.poll() is None:
+                ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+                if ready and sys.stdin.read(1).lower() == "q":
+                    print("\nStopping…", flush=True)
+                    _terminate(proc)
+                    stopped_by_user = True
+                    break
+    except KeyboardInterrupt:
+        print("\nStopping…", flush=True)
+        _terminate(proc)
+        stopped_by_user = True
+    finally:
+        if old_attrs is not None:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_attrs)
+
+    # A deliberate stop is a success; otherwise report the child's own code.
+    if stopped_by_user:
+        return 0
+    return proc.returncode or 0
+
+
 def main(argv):
     args = [a for a in argv if not a.startswith("-")]
     flags = {a for a in argv if a.startswith("-")}
     list_only = "--list" in flags
     auto_yes = "--yes" in flags or "-y" in flags
     do_setup = "--setup" in flags
+    background = "--bg" in flags or "--background" in flags
 
     if "--help" in flags or "-h" in flags:
         print(__doc__.strip())
@@ -298,6 +383,8 @@ def main(argv):
                   file=sys.stderr)
             return rc
 
+    if background:
+        return run_background(cmd, workdir)
     return run(cmd, workdir)
 
 

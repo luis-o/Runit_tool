@@ -62,12 +62,21 @@ there's a single obvious command:
 runit --list             # show ranked launch candidates, run nothing
 runit --yes              # run the single obvious candidate without confirming
 runit --setup            # run setup steps (pip install, …) first, then launch
+runit --bg               # run the launched process in the background; press 'q' to stop
 runit --help             # show help
 ```
 
 With `--setup`, the setup commands the README documents (`pip install`,
 `npm install`, …) are run in order first; if any of them fails, `runit` stops
 and does not launch.
+
+With `--bg` (handy for servers and other long-running processes), the launched
+process starts in its own session and `runit` watches your keyboard: press
+**`q`** (or `Ctrl-C`) to stop it. The process's output still streams to the
+terminal, but its stdin is disconnected, so `--bg` is meant for
+non-interactive processes rather than REPLs or TUIs. On stop, `runit` sends
+`SIGTERM` to the whole process group and escalates to `SIGKILL` if it doesn't
+exit promptly.
 
 ## How it works
 
