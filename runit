@@ -11,9 +11,13 @@ Usage:
     runit --list            # only show the candidates, don't run anything
     runit --yes             # run the single obvious candidate without confirming
     runit --setup           # run setup steps (pip install, …) first, then launch
-    runit --bg              # run the launched process in the background; press
-                            #   'q' (or Ctrl-C) to stop it
+    runit --fg              # launch in the foreground and hand over the terminal
+                            #   (default is background: press 'q'/Ctrl-C to stop)
     runit --help            # show this help
+
+By default the launched process runs in the background and you stop it with
+'q' (or Ctrl-C). Use --fg for interactive processes (REPLs, TUIs) that need
+the terminal.
 """
 
 import os
@@ -392,7 +396,8 @@ def main(argv):
     list_only = "--list" in flags
     auto_yes = "--yes" in flags or "-y" in flags
     do_setup = "--setup" in flags
-    background = "--bg" in flags or "--background" in flags
+    # Background is the default; --fg hands the terminal to the process instead.
+    foreground = "--fg" in flags or "--foreground" in flags
 
     if "--help" in flags or "-h" in flags:
         print(__doc__.strip())
@@ -451,9 +456,9 @@ def main(argv):
                   file=sys.stderr)
             return rc
 
-    if background:
-        return run_background(cmd, workdir)
-    return run(cmd, workdir)
+    if foreground:
+        return run(cmd, workdir)
+    return run_background(cmd, workdir)
 
 
 if __name__ == "__main__":
