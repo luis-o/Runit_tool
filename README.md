@@ -1,5 +1,13 @@
 # runit
 
+```
+ ____   _   _  _   _  ___  _____
+|  _ \ | | | || \ | ||_ _||_   _|
+| |_) || | | ||  \| | | |   | |
+|  _ < | |_| || |\  | | |   | |
+|_| \_\ \___/ |_| \_||___|  |_|
+```
+
 `runit` reads a project's `README.md`, figures out how the tool it describes is
 meant to be launched, and runs it. When a README documents more than one
 plausible launch command, `runit` asks which one you want instead of guessing.
