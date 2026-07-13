@@ -74,9 +74,15 @@ With `--bg` (handy for servers and other long-running processes), the launched
 process starts in its own session and `runit` watches your keyboard: press
 **`q`** (or `Ctrl-C`) to stop it. The process's output still streams to the
 terminal, but its stdin is disconnected, so `--bg` is meant for
-non-interactive processes rather than REPLs or TUIs. On stop, `runit` sends
-`SIGTERM` to the whole process group and escalates to `SIGKILL` if it doesn't
-exit promptly.
+non-interactive processes rather than REPLs or TUIs.
+
+On stop, `runit` tears down **everything the command spawned**, not just the
+top-level process: it snapshots the descendant tree, then sends `SIGTERM` to
+the whole process group *and* to each descendant (so subprocesses that moved
+into their own process group are still stopped), escalating to `SIGKILL` for
+anything that doesn't exit promptly. The one thing it can't reach is a process
+that fully daemonizes and reparents itself away (e.g. containers owned by the
+Docker daemon) — those sever the link back to the launched command.
 
 ## How it works
 

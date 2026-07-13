@@ -248,25 +248,93 @@ def run(cmd, cwd):
     return subprocess.call(cmd, shell=True, cwd=cwd)
 
 
-def _terminate(proc, grace=5.0):
-    """Stop the child's whole process group: SIGTERM, then SIGKILL if it lingers."""
-    if proc.poll() is not None:
-        return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+def _descendants(root_pid):
+    """Every PID descended from root_pid (children, grandchildren, …).
+
+    Walks the process table via `ps`, so it catches descendants that put
+    themselves in their own process group and would otherwise escape a
+    process-group signal. (A process that fully daemonizes — reparenting itself
+    to init — severs the parent link and can't be found this way.)
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-ax", "-o", "pid=", "-o", "ppid="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    children = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
         try:
-            # The child leads its own process group (start_new_session=True),
-            # so its PGID equals its PID — signal the group to catch children.
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+
+    result, seen = [], set()
+    stack = list(children.get(root_pid, []))
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        result.append(pid)
+        stack.extend(children.get(pid, []))
+    return result
+
+
+def _alive(pids):
+    """True if any of the given PIDs is still running."""
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except ProcessLookupError:
+            continue
+    return False
+
+
+def _terminate(proc, grace=5.0):
+    """Stop the launched command and everything it spawned.
+
+    Snapshots the descendant tree *before* signaling (killing reparents any
+    survivors, erasing the links), then signals the whole process group plus
+    each descendant directly: SIGTERM first, then SIGKILL to whatever lingers.
+    """
+    # Snapshot the tree while the parent links still exist.
+    descendants = _descendants(proc.pid)
+
+    def signal_all(sig):
+        # The launched command leads its own process group
+        # (start_new_session=True), so signalling proc.pid's group catches every
+        # child that stayed in it.
+        try:
             os.killpg(proc.pid, sig)
         except (ProcessLookupError, PermissionError):
             try:
                 proc.send_signal(sig)
             except ProcessLookupError:
-                return
-        deadline = grace / 10.0
-        for _ in range(10):
-            if proc.poll() is not None:
-                return
-            time.sleep(deadline)
+                pass
+        # Plus any descendant that moved to its own group but is still our child.
+        for pid in descendants:
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    signal_all(signal.SIGTERM)
+    step = grace / 10.0
+    for _ in range(10):
+        if proc.poll() is not None and not _alive(descendants):
+            return
+        time.sleep(step)
+    signal_all(signal.SIGKILL)
 
 
 def run_background(cmd, cwd):
