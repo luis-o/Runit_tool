@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""
+launch.py — read a README.md, figure out how to launch the tool it describes,
+and run it. When there is more than one plausible way to launch, ask instead
+of guessing.
+
+Usage:
+    ./launch.py                 # use README.md in the current directory
+    ./launch.py path/to/dir     # use README.md in that directory
+    ./launch.py path/to/FILE.md # use that specific markdown file
+    ./launch.py --list          # only show the candidates, don't run anything
+    ./launch.py --yes           # run the single obvious candidate without confirming
+"""
+
+import os
+import re
+import sys
+import subprocess
+
+# Section headings (lowercased) that tend to contain launch instructions,
+# in rough order of how strongly they signal "this is how you run it".
+RUN_SECTIONS = ["usage", "running", "run", "quick start", "quickstart",
+                "getting started", "launch", "how to run", "example", "examples"]
+
+# Substrings that suggest a code line is actually a launch command.
+RUN_HINTS = [
+    "./", "python ", "python3 ", "node ", "npm run", "npm start", "npx ",
+    "yarn ", "pnpm ", "cargo run", "go run", "make ", "bash ", "sh ",
+    "docker run", "docker compose", "docker-compose", "flask run",
+    "uvicorn ", "gunicorn ", "rails ", "./gradlew", "mvn ", "java -jar",
+]
+
+# Lines that look like commands but are setup, not launch — skip these.
+SETUP_HINTS = [
+    "cp ", "chmod ", "export ", "cd ", "git clone", "mkdir ", "source ",
+    "pip install", "npm install", "npm ci", "yarn install", "pnpm install",
+    "apt ", "apt-get", "brew install", "poetry install", "bundle install",
+    "cargo build", "go build", "make install", "make build",
+]
+
+
+class Block:
+    """A fenced code block together with the heading it lives under."""
+    def __init__(self, section, lines):
+        self.section = section          # lowercased nearest heading, or ""
+        self.lines = lines              # raw lines inside the fence
+
+
+def find_readme(target):
+    """Resolve the argument to an actual markdown file path."""
+    if os.path.isdir(target):
+        for name in ("README.md", "readme.md", "Readme.md", "README.markdown"):
+            candidate = os.path.join(target, name)
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+    if os.path.isfile(target):
+        return target
+    return None
+
+
+def parse_blocks(path):
+    """Return a list of Block objects from the markdown file."""
+    blocks = []
+    section = ""
+    in_fence = False
+    fence_lines = []
+    heading_re = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
+
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            line = raw.rstrip("\n")
+            stripped = line.strip()
+
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                if in_fence:
+                    blocks.append(Block(section, fence_lines))
+                    fence_lines = []
+                    in_fence = False
+                else:
+                    in_fence = True
+                continue
+
+            if in_fence:
+                fence_lines.append(line)
+                continue
+
+            m = heading_re.match(line)
+            if m:
+                section = m.group(1).strip().lower()
+
+    return blocks
+
+
+def clean_command(line):
+    """Strip shell prompts and inline comments; return a runnable command or ''."""
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return ""
+    # Drop a leading shell prompt like "$ " or "> ".
+    line = re.sub(r"^[\$>]\s+", "", line)
+    # Drop trailing inline comments (naive but fine for READMEs).
+    if " #" in line:
+        line = line.split(" #", 1)[0].strip()
+    return line
+
+
+def is_setup(cmd):
+    low = cmd.lower()
+    return any(h in low for h in SETUP_HINTS)
+
+
+def looks_like_launch(cmd):
+    low = cmd.lower()
+    return any(h in low for h in RUN_HINTS)
+
+
+def score(cmd, section):
+    """Higher score = more likely to be the intended launch command."""
+    s = 0
+    if section in RUN_SECTIONS:
+        # Earlier sections in the list score higher.
+        s += 10 - RUN_SECTIONS.index(section)
+    if looks_like_launch(cmd):
+        s += 5
+    if cmd.startswith("./"):
+        s += 3
+    return s
+
+
+def collect_candidates(blocks):
+    """Return a de-duplicated, ranked list of (command, section, score)."""
+    seen = set()
+    candidates = []
+    for block in blocks:
+        for raw in block.lines:
+            cmd = clean_command(raw)
+            if not cmd or is_setup(cmd):
+                continue
+            if not looks_like_launch(cmd) and block.section not in RUN_SECTIONS:
+                continue
+            if cmd in seen:
+                continue
+            seen.add(cmd)
+            candidates.append((cmd, block.section, score(cmd, block.section)))
+    candidates.sort(key=lambda c: c[2], reverse=True)
+    return candidates
+
+
+def ask_choice(candidates):
+    """Show the candidates and let the user pick one (or quit)."""
+    print("Multiple ways to launch were found — which one do you want to run?\n")
+    for i, (cmd, section, _) in enumerate(candidates, 1):
+        where = f"  (under “{section}”)" if section else ""
+        print(f"  {i}) {cmd}{where}")
+    print("  q) quit\n")
+
+    while True:
+        choice = input("Choice: ").strip().lower()
+        if choice in ("q", "quit", ""):
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(candidates):
+            return candidates[int(choice) - 1][0]
+        print("Please enter a number from the list, or 'q' to quit.")
+
+
+def confirm(cmd):
+    reply = input(f"Run:  {cmd}\n[Y/n] ").strip().lower()
+    return reply in ("", "y", "yes")
+
+
+def run(cmd, cwd):
+    print(f"\n$ {cmd}\n", flush=True)
+    return subprocess.call(cmd, shell=True, cwd=cwd)
+
+
+def main(argv):
+    args = [a for a in argv if not a.startswith("-")]
+    flags = {a for a in argv if a.startswith("-")}
+    list_only = "--list" in flags
+    auto_yes = "--yes" in flags or "-y" in flags
+
+    target = args[0] if args else "."
+    readme = find_readme(target)
+    if not readme:
+        print(f"No README.md found for '{target}'.", file=sys.stderr)
+        return 1
+
+    workdir = os.path.dirname(os.path.abspath(readme)) or "."
+    print(f"Reading {readme}\n")
+
+    candidates = collect_candidates(parse_blocks(readme))
+    if not candidates:
+        print("Couldn't find any launch command in the README.", file=sys.stderr)
+        return 1
+
+    if list_only:
+        for cmd, section, sc in candidates:
+            where = f"  (under “{section}”)" if section else ""
+            print(f"  [{sc:>2}] {cmd}{where}")
+        return 0
+
+    # Decide whether the launch method is unambiguous.
+    top = candidates[0]
+    tied = [c for c in candidates if c[2] == top[2]]
+
+    if len(tied) == 1:
+        cmd = top[0]
+        if auto_yes or confirm(cmd):
+            return run(cmd, workdir)
+        print("Aborted.")
+        return 0
+
+    # Ambiguous — ask rather than guess.
+    cmd = ask_choice(candidates)
+    if cmd is None:
+        print("Aborted.")
+        return 0
+    return run(cmd, workdir)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except (KeyboardInterrupt, EOFError):
+        print("\nAborted.")
+        sys.exit(130)
